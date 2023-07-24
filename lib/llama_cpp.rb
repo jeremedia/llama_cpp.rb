@@ -29,9 +29,22 @@ module LLaMACpp
   # @param temperature [Float] The temperature for temperature sampling.
   # @return [String]
   def generate(context, prompt, # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/ParameterLists, Metrics/PerceivedComplexity
-               n_predict: 128, n_threads: 1, n_keep: 10, n_batch: 512, repeat_last_n: 64,
-               repeat_penalty: 1.1, frequency: 0.0, presence: 0.0, top_k: 40,
-               top_p: 0.95, tfs_z: 1.0, typical_p: 1.0, temperature: 0.8)
+               n_predict: 128,
+               n_threads: 1,
+               n_keep: 10,
+               n_batch: 512,
+               repeat_last_n: 64,
+               repeat_penalty: 1.1,
+               frequency: 0.0,
+               presence: 0.0,
+               top_k: 40,
+               top_p: 0.95,
+               tfs_z: 1.0,
+               typical_p: 1.0,
+               temperature: 0.8,
+               token_handler: nil,
+               as_json: false
+  )
     raise ArgumentError, 'context must be an instance of LLaMACpp::Context' unless context.is_a?(LLaMACpp::Context)
     raise ArgumentError, 'prompt must be a String' unless prompt.is_a?(String)
 
@@ -58,7 +71,19 @@ module LLaMACpp
           embd.insert(0, last_n_tokens[(n_ctx - (n_left / 2) - embd.size)...-embd.size])
         end
 
-        context.eval(tokens: embd, n_past: n_past, n_threads: n_threads)
+        begin
+          embd = embd.flatten
+          context.eval(tokens: embd, n_past: n_past, n_threads: n_threads)
+        rescue StandardError => e
+          puts "context.eval Error: #{e.message}"
+          puts "tokens: #{embd}"
+          puts "tokens: #{embd.class}"
+          puts "n_past: #{n_past}"
+          puts "n_threads: #{n_threads}"
+          #so_far = output&.join.delete_prefix(spaced_prompt).strip || ''
+
+          return { error: e.message, tokens: embd, n_past: n_past, n_threads: n_threads }.to_json if as_json
+        end
       end
 
       n_past += embd.size
@@ -99,11 +124,39 @@ module LLaMACpp
         end
       end
 
-      embd.each { |token| output << context.token_to_str(token) }
+      embd.each do |token|
+        token_str = context.token_to_str(token)
+        output << token_str
+        token_handler&.call(token_str)
+      end
 
       break if !embd.empty? && embd[-1] == LLaMACpp.token_eos
     end
 
+    output_string = output.join.delete_prefix(spaced_prompt).strip
+    context.print_timings
+    if as_json
+      timings = context.timings
+      timing_hash = {
+        t_start_ms: timings.t_start_ms(),
+        t_end_ms: timings.t_end_ms(),
+        t_load_ms: timings.t_load_ms(),
+        t_sample_ms: timings.t_sample_ms(),
+        t_p_eval_ms: timings.t_p_eval_ms(),
+        t_eval_ms: timings.t_eval_ms(),
+        n_sample: timings.n_sample(),
+        n_p_eval: timings.n_p_eval(),
+        n_eval: timings.n_eval()
+      }
+
+      json_hash = {
+        'prompt' => prompt,
+        'output' => output_string,
+        'output_raw' => output,
+        'timings' => timing_hash,
+      }
+      return json_hash.to_json
+    end
     output.join.delete_prefix(spaced_prompt).strip
   end
 end
