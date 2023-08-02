@@ -42,6 +42,7 @@ struct ggml_metal_context {
     id<MTLComputePipelineState> pipeline_##name
 
     GGML_METAL_DECL_KERNEL(add);
+    GGML_METAL_DECL_KERNEL(add_row); // TODO: avoid this extra kernel, instead extend the "add" kernel to support broadcast
     GGML_METAL_DECL_KERNEL(mul);
     GGML_METAL_DECL_KERNEL(mul_row); // TODO: avoid this extra kernel, instead extend the "mul" kernel to support broadcast
     GGML_METAL_DECL_KERNEL(scale);
@@ -157,6 +158,7 @@ struct ggml_metal_context * ggml_metal_init(int n_cb) {
         fprintf(stderr, "%s: loaded %-32s %16p\n", __func__, "kernel_"#name, (void *) ctx->pipeline_##name);
 
         GGML_METAL_ADD_KERNEL(add);
+        GGML_METAL_ADD_KERNEL(add_row);
         GGML_METAL_ADD_KERNEL(mul);
         GGML_METAL_ADD_KERNEL(mul_row);
         GGML_METAL_ADD_KERNEL(scale);
@@ -464,10 +466,16 @@ void ggml_metal_graph_compute(
                                 encoder = [command_buffer computeCommandEncoder];
                             }
 
-                            [encoder setComputePipelineState:ctx->pipeline_add];
+                            if (ggml_nelements(src1) == ne10) {
+                                // src1 is a row
+                                [encoder setComputePipelineState:ctx->pipeline_add_row];
+                            } else {
+                                [encoder setComputePipelineState:ctx->pipeline_add];
+                            }
                             [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
                             [encoder setBuffer:id_src1 offset:offs_src1 atIndex:1];
                             [encoder setBuffer:id_dst  offset:offs_dst  atIndex:2];
+                            [encoder setBytes:&ne00 length:sizeof(ne00) atIndex:3];
 
                             const int64_t n = ggml_nelements(dst);
 
@@ -511,48 +519,56 @@ void ggml_metal_graph_compute(
 
                             [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         } break;
-                    case GGML_OP_SILU:
-                        {
-                            if (encoder == nil) {
-                                encoder = [command_buffer computeCommandEncoder];
-                            }
+                    case GGML_OP_UNARY:
+                        switch (ggml_get_unary_op(gf->nodes[i])) {
+                            case GGML_UNARY_OP_SILU:
+                                {
+                                    if (encoder == nil) {
+                                        encoder = [command_buffer computeCommandEncoder];
+                                    }
 
-                            [encoder setComputePipelineState:ctx->pipeline_silu];
-                            [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
-                            [encoder setBuffer:id_dst  offset:offs_dst  atIndex:1];
+                                    [encoder setComputePipelineState:ctx->pipeline_silu];
+                                    [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
+                                    [encoder setBuffer:id_dst  offset:offs_dst  atIndex:1];
 
-                            const int64_t n = ggml_nelements(dst);
+                                    const int64_t n = ggml_nelements(dst);
 
-                            [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                                    [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                                } break;
+                            case GGML_UNARY_OP_RELU:
+                                {
+                                    if (encoder == nil) {
+                                        encoder = [command_buffer computeCommandEncoder];
+                                    }
+
+                                    [encoder setComputePipelineState:ctx->pipeline_relu];
+                                    [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
+                                    [encoder setBuffer:id_dst  offset:offs_dst  atIndex:1];
+
+                                    const int64_t n = ggml_nelements(dst);
+
+                                    [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                                } break;
+                            case GGML_UNARY_OP_GELU:
+                                {
+                                    if (encoder == nil) {
+                                        encoder = [command_buffer computeCommandEncoder];
+                                    }
+
+                                    [encoder setComputePipelineState:ctx->pipeline_gelu];
+                                    [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
+                                    [encoder setBuffer:id_dst  offset:offs_dst  atIndex:1];
+
+                                    const int64_t n = ggml_nelements(dst);
+
+                                    [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                                } break;
+                            default:
+                                {
+                                    fprintf(stderr, "%s: node %3d, op = %8s not implemented\n", __func__, i, ggml_op_name(dst->op));
+                                    GGML_ASSERT(false);
+                                }
                         } break;
-                    case GGML_OP_RELU:
-                        {
-                            if (encoder == nil) {
-                                encoder = [command_buffer computeCommandEncoder];
-                            }
-
-                            [encoder setComputePipelineState:ctx->pipeline_relu];
-                            [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
-                            [encoder setBuffer:id_dst  offset:offs_dst  atIndex:1];
-
-                            const int64_t n = ggml_nelements(dst);
-
-                            [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-                        } break;
-                    case GGML_OP_GELU:
-                    {
-                            if (encoder == nil) {
-                                encoder = [command_buffer computeCommandEncoder];
-                            }
-
-                            [encoder setComputePipelineState:ctx->pipeline_gelu];
-                            [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
-                            [encoder setBuffer:id_dst  offset:offs_dst  atIndex:1];
-
-                            const int64_t n = ggml_nelements(dst);
-
-                            [encoder dispatchThreadgroups:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-                    } break;
                     case GGML_OP_SOFT_MAX:
                         {
                             if (encoder == nil) {
@@ -577,7 +593,7 @@ void ggml_metal_graph_compute(
                                 encoder = [command_buffer computeCommandEncoder];
                             }
 
-                            const int n_past = ((int32_t *)(src1->data))[0];
+                            const int n_past = ((int32_t *)(dst->op_params))[0];
 
                             [encoder setComputePipelineState:ctx->pipeline_diag_mask_inf];
                             [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
@@ -796,7 +812,8 @@ void ggml_metal_graph_compute(
                                 encoder = [command_buffer computeCommandEncoder];
                             }
 
-                            const float eps = 1e-6f;
+                            float eps;
+                            memcpy(&eps, dst->op_params, sizeof(float));
 
                             const int nth = 512;
 
@@ -842,9 +859,10 @@ void ggml_metal_graph_compute(
 
                             GGML_ASSERT((src0t == GGML_TYPE_F32));
 
-                            const int   n_past   = ((int32_t *) src1->data)[0]; UNUSED(n_past);
-                            const int   n_head   = ((int32_t *) src1->data)[1];
-                            const float max_bias = ((float *)   src1->data)[2];
+                            const int n_past = ((int32_t *) dst->op_params)[0]; UNUSED(n_past);
+                            const int n_head = ((int32_t *) dst->op_params)[1];
+                            float max_bias;
+                            memcpy(&max_bias, (int32_t *) dst->op_params + 2, sizeof(float));
 
                             if (__builtin_popcount(n_head) != 1) {
                                 GGML_ASSERT(false && "only power-of-two n_head implemented");
@@ -882,15 +900,14 @@ void ggml_metal_graph_compute(
                                 encoder = [command_buffer computeCommandEncoder];
                             }
 
-                            const int n_dims = ((int32_t *) src1->data)[1];
-                            const int mode   = ((int32_t *) src1->data)[2];
-
-                            const int n_past = ((int32_t *)(src1->data))[0];
+                            const int n_past = ((int32_t *) dst->op_params)[0];
+                            const int n_dims = ((int32_t *) dst->op_params)[1];
+                            const int mode   = ((int32_t *) dst->op_params)[2];
 
                             float freq_base;
                             float freq_scale;
-                            memcpy(&freq_base,  (int32_t *) src1->data + 4, sizeof(float));
-                            memcpy(&freq_scale, (int32_t *) src1->data + 5, sizeof(float));
+                            memcpy(&freq_base,  (int32_t *) dst->op_params + 4, sizeof(float));
+                            memcpy(&freq_scale, (int32_t *) dst->op_params + 5, sizeof(float));
 
                             [encoder setComputePipelineState:ctx->pipeline_rope];
                             [encoder setBuffer:id_src0 offset:offs_src0 atIndex:0];
@@ -919,7 +936,9 @@ void ggml_metal_graph_compute(
 
                             [encoder dispatchThreadgroups:MTLSizeMake(ne01, ne02, ne03) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         } break;
+                    case GGML_OP_DUP:
                     case GGML_OP_CPY:
+                    case GGML_OP_CONT:
                         {
                             if (encoder == nil) {
                                 encoder = [command_buffer computeCommandEncoder];
@@ -969,8 +988,10 @@ void ggml_metal_graph_compute(
                             [encoder dispatchThreadgroups:MTLSizeMake(ne01, ne02, ne03) threadsPerThreadgroup:MTLSizeMake(nth, 1, 1)];
                         } break;
                     default:
-                        fprintf(stderr, "%s: node %3d, op = %8s not implemented\n", __func__, i, ggml_op_name(dst->op));
-                        GGML_ASSERT(false);
+                        {
+                            fprintf(stderr, "%s: node %3d, op = %8s not implemented\n", __func__, i, ggml_op_name(dst->op));
+                            GGML_ASSERT(false);
+                        }
                 }
             }
 
